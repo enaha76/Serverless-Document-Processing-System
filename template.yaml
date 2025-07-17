@@ -1,0 +1,368 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Projet3 - Complete Serverless Processing (ap-northeast-1) - FINAL VERSION
+
+Parameters:
+  Email:
+    Type: String
+    Description: Email address for SNS notifications
+  Force:
+    Type: String
+    Description: Change this value to force Lambda redeployment
+    Default: "0"
+  CodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda code
+    Default: "code-lambda-projet3-242198490044-ap-northeast-1"
+  CodeKey:
+    Type: String
+    Description: S3 key for Lambda code zip file
+    Default: "code.zip"
+  OpenRouterApiKey:
+    Type: String
+    Description: OpenRouter API Key
+    NoEcho: true
+  UploadBucketName:
+    Type: String
+    Description: Name of the S3 bucket for file uploads
+    Default: "projet3-upload-bucket-ap-northeast-1"
+  Environment:
+    Type: String
+    Description: Environment (e.g., dev, prod)
+    Default: "dev"
+  Owner:
+    Type: String
+    Description: Owner of the resources
+    Default: "AdminUser"
+
+Resources:
+  # KMS Key for Encryption
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting S3, DynamoDB, Parameter Store, and SQS
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              Service: 
+                - lambda.amazonaws.com
+                - sqs.amazonaws.com
+                - s3.amazonaws.com
+                - sns.amazonaws.com
+                - dynamodb.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+      EnableKeyRotation: true
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # KMS Key Alias
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${AWS::StackName}-key
+      TargetKeyId: !Ref KMSKey
+
+  # Parameter Store for OpenRouter API Key
+  OpenRouterApiKeyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${AWS::StackName}/openrouter-api-key
+      Type: String
+      Value: !Ref OpenRouterApiKey
+      Tags:
+        Project: Projet3
+        Environment: !Ref Environment
+        Owner: !Ref Owner
+
+  # SQS Dead-Letter Queue
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-dlq
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref KMSKey
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # DynamoDB Table
+  MetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${AWS::StackName}-metadata
+      AttributeDefinitions:
+        - AttributeName: NomFichier
+          AttributeType: S
+      KeySchema:
+        - AttributeName: NomFichier
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref KMSKey
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # SNS Topic
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-sns-topic
+      KmsMasterKeyId: !Ref KMSKey
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # SNS Subscription
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref Email
+      TopicArn: !Ref SNSTopic
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-lambda-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt MetadataTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SNSTopic
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${UploadBucketName}/*
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/openrouter-api-key
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt KMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt DeadLetterQueue.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                Resource: !Sub arn:aws:s3:::${CloudTrailBucket}
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # Lambda Function
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      ForceUpdate: !Ref Force
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-lambda
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MetadataTable
+          TOPIC_ARN: !Ref SNSTopic
+          OPENROUTER_API_KEY_PARAM: !Sub /${AWS::StackName}/openrouter-api-key
+          ENABLE_OPENROUTER: 'true'
+          ENABLE_DYNAMODB: 'true'
+          ENABLE_SNS: 'true'
+      TracingConfig:
+        Mode: Active
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # Lambda Permission for S3
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${UploadBucketName}
+
+  # S3 Upload Bucket with Lambda Trigger
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: S3InvokeLambdaPermission
+    Properties:
+      BucketName: !Ref UploadBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt LambdaFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .txt
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # CloudTrail Bucket
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+  # Custom Resource to Add CloudTrail Bucket Policy
+  CloudTrailBucketPolicyCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: CloudTrailBucket
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+      BucketName: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${CloudTrailBucket}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub arn:aws:s3:::${CloudTrailBucket}
+
+  # CloudTrail Trail
+  CloudTrailTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicyCustomResource
+    Properties:
+      TrailName: !Sub ${AWS::StackName}-Trail
+      S3BucketName: !Ref CloudTrailBucket
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      IsLogging: true
+      Tags:
+        - Key: Project
+          Value: Projet3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref Owner
+
+Outputs:
+  BucketName:
+    Description: S3 bucket for uploads
+    Value: !Ref UploadBucket
+  TableName:
+    Description: DynamoDB table
+    Value: !Ref MetadataTable
+  Topic:
+    Description: SNS Topic ARN
+    Value: !Ref SNSTopic
+  LambdaFunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt LambdaFunction.Arn
+  KMSKeyArn:
+    Description: KMS Key ARN
+    Value: !GetAtt KMSKey.Arn
+  DeadLetterQueueArn:
+    Description: SQS Dead-Letter Queue ARN
+    Value: !GetAtt DeadLetterQueue.Arn
+  CloudTrailBucketName:
+    Description: CloudTrail log bucket
+    Value: !Ref CloudTrailBucket
