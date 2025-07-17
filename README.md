@@ -349,7 +349,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 For support and questions:
 
 - **Issues**: [GitHub Issues](https://github.com/yourusername/projet3-serverless-processing/issues)
-- **Email**: your-email@domain.com
+- **Email**: ahmedou.enaha.enaha@gmail.com
 - **Documentation**: [Project Wiki](https://github.com/yourusername/projet3-serverless-processing/wiki)
 
 ## 📊 Project Status
